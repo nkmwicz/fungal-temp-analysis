@@ -1,0 +1,151 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .qmd
+      format_name: quarto
+      format_version: '1.0'
+      jupytext_version: 1.19.4
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+import pandas as pd
+import re
+from numpy import mean, nan
+import subprocess, requests, tarfile, os
+from zipfile import ZipFile
+from pybarrnap import Barrnap
+from pybarrnap.utils import load_example_fasta_file
+
+# Read in the data
+df = pd.read_csv("eukaryotes_ncbi_temperatures.csv")
+
+columns = ["#Organism Name", "Organism Groups", "Assembly", "Temperature (°C)"]
+df = df[columns]
+df = df.dropna(subset="Temperature (°C)")
+df = df.loc[df['Organism Groups'].str.contains("Fung")]
+df.drop_duplicates(subset="Assembly")
+
+# Extract species root names
+df['species_root_name'] = df['#Organism Name'].apply(lambda item: " ".join(item.split(" ")[:2]))
+df['species_root_name'] = df['species_root_name'].apply(lambda item: re.sub(r"[\[\];'\",\(\).;\-]", "", item))
+
+# Identify duplicates based on species root names
+df['duplicate'] = df.duplicated(subset="species_root_name", keep=False)
+
+# Remove entries with " cf. " in the organism name
+df = df.loc[~df['#Organism Name'].str.contains(" cf. ")]
+df = df.reset_index(drop=True)
+df.head()
+
+```
+
+```{python}
+# get fasta files
+# unzip fasta
+# barrnap fasta file for quality.
+# get tRNA & save it in df
+# scrape web for it????
+is_quality = []
+quality_scores = []
+quality_mean = []
+trna_fasta = []
+
+for row in range(1):
+    assembly = df.at[row, 'Assembly']
+    url = f"https://api.ncbi.nlm.nih.gov/datasets/v2/genome/accession/{assembly}/download?include_annotation_type=GENOME_FASTA"
+    res = requests.get(url)  # this returns a zip folder
+
+    # Define the filename for the downloaded zip file
+    zip_filename = f"{assembly}.zip"
+    # Save the zip file
+    with open(zip_filename, 'wb') as f:
+        for chunk in res.iter_content(chunk_size=8192):
+            f.write(chunk)
+    extract_dir = f"{assembly}_dir"
+    if not f"{extract_dir}":
+        os.mkdir(extract_dir)
+
+    with ZipFile(zip_filename, 'r') as zip_ref:
+        zip_ref.extractall(extract_dir)
+    
+    # Name path of the extracted folder
+    fasta_path = f"{extract_dir}/ncbi_dataset/data/{assembly}"
+
+    fasta_file = os.listdir(fasta_path)[0] # => []
+    # Run pybarrnap rRNA prediction
+    barrnap = Barrnap(
+        fasta_path + "/" + fasta_file,
+        evalue=1e-6,
+        lencutoff=0.8,
+        reject=0.25,
+        threads=1,
+        kingdom="euk",
+        accurate=False,
+        quiet=False,
+    )
+    result = barrnap.run()
+    # Get rRNA GFF text and print
+    # print("\n========== Print rRNA GFF ==========")
+    gff_text = result.get_gff_text()
+    gff_text1 = [lines for lines in gff_text.split("\n")]
+    gff_nums = [
+        float(item.split("\t")[5]) for item in gff_text1[1:] if len(item.split('\t'))>6
+        ]
+    gff_mean = mean(gff_nums)
+    print(gff_text)
+    print(f"gff_mean: {gff_mean}")
+
+    # Get rRNA features and print
+    print("\n========== Print rRNA features ==========")
+    genes_set = set()
+    needed_genes = {"5S", "5_8S", "18S", "28S"}
+    for rec in result.seq_records: # seq_records is a list
+        print(rec)
+        for feature in rec.features: # features on rec is a list
+            qualifiers = feature.qualifiers #feature.id, feature.type, feature.location, feature.qualifiers)
+            if "gene" in qualifiers:
+                for g in qualifiers["gene"]:
+                    genes_set.add(g)
+
+    return_value = None # Quality Metric
+    if all([any([needed in g for g in genes_set]) for needed in needed_genes]):
+        return_value = True
+        quality_nums = gff_nums
+        quality_mean = gff_mean
+    else:
+        return_value = False
+        quality_nums = nan
+        quality_mean = nan
+
+    output_name = f"{fasta_file}_trna.fasta"
+    !tRNAscan-SE --fasta ../../../../{output_name} fasta_file
+
+    is_quality.append(return_value)
+    quality_scores.append(quality_nums)
+    quality_mean.append(quality_mean)
+    trna_fasta.append(output_name)
+            # qaul_genes = []
+            # all three types had to be identified
+            # must = '5S', '5_8S', '18S', '28S'
+
+    # Do stuff here with the Fasta file!
+    # ✔️ Pybarrnap
+    # ✔️Create a quality metric & save to df
+    # Save quality metric to df
+    # Find tRNA from the fasta
+    # Save tRNA to df
+
+    %pwd
+    %ls
+    %rm -rf {extract_dir}
+    print("\n")
+    print(f"{'='*10}")
+    print("\n")
+    %ls
+    # !ncbi-genome-download --section genbank --assembly-accessions {assembly} --formats fasta fungi
+```
